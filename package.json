@@ -1,0 +1,30 @@
+{
+  "name": "ecommerce-management-system",
+  "version": "1.0.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "seed:admin": "ts-node-dev --transpile-only src/seeds/createAdmin.ts"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "dotenv": "^18.0.0",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.0",
+    "@types/node": "^24.0.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.0.0"
+  },
+  "type": "commonjs",
+  "allowScripts": {
+    "bcrypt@6.0.0": true
+  }
+}

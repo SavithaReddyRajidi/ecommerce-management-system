@@ -9,84 +9,193 @@ const getOrderId = (req: AuthRequest): string => {
   return Array.isArray(id) ? id[0] : id ?? "";
 };
 
-export async function createOrder(req: AuthRequest, res: Response): Promise<void> {
-  const cart = await Cart.findOne({ user: req.user!.id }).populate("items.product");
+// Create Order with Duplicate Request Protection
+export async function createOrder(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  const idempotencyKey = req.get("Idempotency-Key")?.trim();
 
-  if (!cart || !cart.items.length) {
-    res.status(400).json({ message: "Cart is empty" });
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    res.status(400).json({
+      message: "A valid Idempotency-Key header is required"
+    });
     return;
   }
 
-  const reserved: { id: string; quantity: number }[] = [];
-  const items: any[] = [];
+  const userId = req.user!.id;
+
+  // Check whether this request was already processed.
+  const existingOrder = await Order.findOne({
+    user: userId,
+    idempotencyKey
+  });
+
+  if (existingOrder) {
+    res.status(200).json({
+      message: "Order already created for this request",
+      order: existingOrder
+    });
+    return;
+  }
+
+  const session = await mongoose.startSession();
+
+  let createdOrder: any = null;
+  let duplicateRequest = false;
 
   try {
-    for (const entry of cart.items as any[]) {
-      const p = entry.product;
+    await session.withTransaction(async () => {
+      // Check again inside the transaction to handle
+      // simultaneous requests using the same key.
+      const existing = await Order.findOne({
+        user: userId,
+        idempotencyKey
+      }).session(session);
 
-      if (!p) throw new Error("Cart contains a deleted product");
+      if (existing) {
+        createdOrder = existing;
+        duplicateRequest = true;
+        return;
+      }
 
-      const changed = await Product.findOneAndUpdate(
-        { _id: p._id, stock: { $gte: entry.quantity } },
-        { $inc: { stock: -entry.quantity } },
-        { new: true }
+      const cart = await Cart.findOne({
+        user: userId
+      })
+        .session(session)
+        .populate("items.product");
+
+      if (!cart || !cart.items.length) {
+        throw new Error("Cart is empty");
+      }
+
+      const items: any[] = [];
+
+      for (const entry of cart.items as any[]) {
+        const p = entry.product;
+
+        if (!p) {
+          throw new Error("Cart contains a deleted product");
+        }
+
+        const changed = await Product.findOneAndUpdate(
+          {
+            _id: p._id,
+            stock: { $gte: entry.quantity }
+          },
+          {
+            $inc: { stock: -entry.quantity }
+          },
+          {
+            new: true,
+            session
+          }
+        );
+
+        if (!changed) {
+          throw new Error(`Insufficient stock for ${p.name}`);
+        }
+
+        items.push({
+          product: p._id,
+          name: p.name,
+          quantity: entry.quantity,
+          unitPrice: p.price,
+          lineTotal: p.price * entry.quantity
+        });
+      }
+
+      const total = items.reduce(
+        (sum, item) => sum + item.lineTotal,
+        0
       );
 
-      if (!changed) throw new Error(`Insufficient stock for ${p.name}`);
+      const orders = await Order.create(
+        [{
+          user: userId,
+          items,
+          total,
+          status: "pending",
+          paymentStatus: "unpaid",
+          idempotencyKey
+        }],
+        { session }
+      );
 
-      reserved.push({ id: p.id, quantity: entry.quantity });
+      createdOrder = orders[0];
 
-      items.push({
-        product: p._id,
-        name: p.name,
-        quantity: entry.quantity,
-        unitPrice: p.price,
-        lineTotal: p.price * entry.quantity
+      // Clear the cart only after order creation succeeds.
+      cart.items = [] as any;
+      await cart.save({ session });
+    });
+
+    res.status(duplicateRequest ? 200 : 201).json({
+      message: duplicateRequest
+        ? "Order already created for this request"
+        : "Order created; stock reserved pending payment",
+      order: createdOrder
+    });
+
+  } catch (e: any) {
+    // A simultaneous request may have inserted the same key first.
+    if (e.code === 11000) {
+      const duplicate = await Order.findOne({
+        user: userId,
+        idempotencyKey
+      });
+
+      if (duplicate) {
+        res.status(200).json({
+          message: "Order already created for this request",
+          order: duplicate
+        });
+        return;
+      }
+    }
+
+    console.error(e);
+
+    if (e.message === "Cart is empty") {
+      res.status(400).json({ message: e.message });
+    } else if (
+      e.message === "Cart contains a deleted product" ||
+      e.message.startsWith("Insufficient stock")
+    ) {
+      res.status(409).json({ message: e.message });
+    } else {
+      res.status(500).json({
+        message: "Order creation failed"
       });
     }
 
-    const total = items.reduce((s, i) => s + i.lineTotal, 0);
-
-    const order = await Order.create({
-      user: req.user!.id,
-      items,
-      total,
-      status: "pending",
-      paymentStatus: "unpaid"
-    });
-
-    cart.items = [] as any;
-    await cart.save();
-
-    res.status(201).json({
-      message: "Order created; stock reserved pending payment",
-      order
-    });
-  } catch (e: any) {
-    for (const r of reserved) {
-      await Product.updateOne(
-        { _id: r.id },
-        { $inc: { stock: r.quantity } }
-      );
-    }
-
-    res.status(409).json({
-      message: e.message || "Order creation failed"
-    });
+  } finally {
+    await session.endSession();
   }
 }
 
-export async function listOrders(req: AuthRequest, res: Response): Promise<void> {
+
+// Get All Orders
+export async function listOrders(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
   res.json(
     await Order.find(
-      req.user!.role === "admin" ? {} : { user: req.user!.id }
+      req.user!.role === "admin"
+        ? {}
+        : { user: req.user!.id }
     )
       .populate("user", "name email")
       .sort({ createdAt: -1 })
   );
 }
 
-export async function oneOrder(req: AuthRequest, res: Response): Promise<void> {
+
+// Get Individual Order
+export async function oneOrder(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
   const id = getOrderId(req);
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -94,16 +203,23 @@ export async function oneOrder(req: AuthRequest, res: Response): Promise<void> {
     return;
   }
 
-  const o = await Order.findById(id).populate("user", "name email");
+  const o = await Order.findById(id).populate(
+    "user",
+    "name email"
+  );
 
   if (!o) {
     res.status(404).json({ message: "Order not found" });
     return;
   }
 
-  const owner = (o.user as any)._id?.toString() || o.user.toString();
+  const owner =
+    (o.user as any)._id?.toString() || o.user.toString();
 
-  if (req.user!.role !== "admin" && owner !== req.user!.id) {
+  if (
+    req.user!.role !== "admin" &&
+    owner !== req.user!.id
+  ) {
     res.status(403).json({ message: "Not your order" });
     return;
   }
@@ -111,8 +227,17 @@ export async function oneOrder(req: AuthRequest, res: Response): Promise<void> {
   res.json(o);
 }
 
-export async function setOrderStatus(req: AuthRequest, res: Response): Promise<void> {
-  if (!["pending", "confirmed", "shipped"].includes(req.body.status)) {
+
+// Update Order Status
+export async function setOrderStatus(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  if (
+    !["pending", "confirmed", "shipped"].includes(
+      req.body.status
+    )
+  ) {
     res.status(400).json({ message: "Invalid status" });
     return;
   }
@@ -137,7 +262,12 @@ export async function setOrderStatus(req: AuthRequest, res: Response): Promise<v
   res.json(o);
 }
 
-export async function cancelOrder(req: AuthRequest, res: Response): Promise<void> {
+
+// Cancel Order
+export async function cancelOrder(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
   const id = getOrderId(req);
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -152,13 +282,22 @@ export async function cancelOrder(req: AuthRequest, res: Response): Promise<void
     return;
   }
 
-  if (req.user!.role !== "admin" && o.user.toString() !== req.user!.id) {
+  if (
+    req.user!.role !== "admin" &&
+    o.user.toString() !== req.user!.id
+  ) {
     res.status(403).json({ message: "Not your order" });
     return;
   }
 
-  if (!["pending", "confirmed"].includes(o.status) || o.paymentStatus === "paid") {
-    res.status(409).json({ message: "Order cannot be cancelled" });
+  // Only unpaid pending or confirmed orders can be cancelled.
+  if (
+    !["pending", "confirmed"].includes(o.status) ||
+    o.paymentStatus !== "unpaid"
+  ) {
+    res.status(409).json({
+      message: "Order cannot be cancelled"
+    });
     return;
   }
 

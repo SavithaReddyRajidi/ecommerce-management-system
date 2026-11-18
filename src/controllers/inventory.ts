@@ -9,7 +9,11 @@ const getProductId = (req: AuthRequest): string => {
   return Array.isArray(id) ? id[0] : id ?? "";
 };
 
-export async function stockInfo(req: AuthRequest, res: Response): Promise<void> {
+// Get Product Stock
+export async function stockInfo(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
   const productId = getProductId(req);
 
   if (!mongoose.Types.ObjectId.isValid(productId)) {
@@ -31,9 +35,22 @@ export async function stockInfo(req: AuthRequest, res: Response): Promise<void> 
   });
 }
 
-export async function setStock(req: AuthRequest, res: Response): Promise<void> {
+// Update Product Stock
+export async function setStock(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
   const productId = getProductId(req);
   const { quantity } = req.body;
+
+  // Debugging logs
+  console.log("SET STOCK CONTROLLER REACHED");
+  console.log("Product ID:", productId);
+  console.log("Product ID valid:", mongoose.Types.ObjectId.isValid(productId));
+  console.log("Request body:", req.body);
+  console.log("Quantity:", quantity);
+  console.log("Quantity type:", typeof quantity);
+  console.log("Is integer:", Number.isInteger(quantity));
 
   if (
     !mongoose.Types.ObjectId.isValid(productId) ||
@@ -56,6 +73,8 @@ export async function setStock(req: AuthRequest, res: Response): Promise<void> {
     res.status(404).json({ message: "Product not found" });
     return;
   }
+
+  console.log("Stock updated successfully:", p.stock);
 
   res.json({
     productId: p.id,
